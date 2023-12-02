@@ -1,0 +1,116 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import pandas as pd
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+!pip install shap
+import shap
+from sklearn.metrics import r2_score
+
+
+# 读取 Excel 文件
+df = pd.read_excel('turnover.xlsx')  # 请替换为你的文件名和工作表名
+df1 = df.iloc[:, 0:-2]
+
+# 提取多个输入特征和一个输出标签
+features = df1.iloc[:, df1.columns != 'turnover'].values  # 请替换为你的输入特征列名
+labels = df1['turnover'].values  # 请替换为你的输出列名
+
+# 标准化输入特征
+scaler = StandardScaler()
+features = scaler.fit_transform(features)
+
+# 转换为 PyTorch 张量
+features = torch.FloatTensor(features).view(-1, 1, features.shape[1])  # 修改张量的形状以适应 LSTM 的输入
+labels = torch.FloatTensor(labels)
+
+# 移动数据到 GPU
+features = features.cuda()
+labels = labels.cuda()
+
+# 定义模型、损失函数和优化器
+class LSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size):
+        super(LSTM, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        out = self.fc(out[:, -1, :])  # 仅使用最后一个时间步的输出
+        return out
+
+# 定义超参数
+input_size = features.shape[2]  # 输入特征的维度（多个自变量）
+hidden_size = 100  # LSTM隐藏状态的维度
+num_layers = 1  # LSTM层数
+output_size = 1  # 输出维度（单因变量）
+
+# 创建模型、损失函数和优化器
+model = LSTM(input_size, hidden_size, num_layers, output_size).cuda()
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+# 准备数据集
+dataset = TensorDataset(features, labels)
+data_loader = DataLoader(dataset, batch_size=64, shuffle=True)
+
+# 训练模型
+num_epochs = 1000
+losses = []  # 用于记录每个 epoch 的损失值
+
+for epoch in range(num_epochs):
+    epoch_losses = []  # 用于记录当前 epoch 中每个 batch 的损失值
+
+    for batch_features, batch_labels in data_loader:
+        # 将输入数据和标签移动到 GPU 上
+        batch_features = batch_features.cuda()
+        batch_labels = batch_labels.cuda()
+
+        # 将输入数据传递给模型
+        outputs = model(batch_features)
+
+        # 计算损失
+        loss = criterion(outputs, batch_labels)
+        epoch_losses.append(loss.item())
+
+        # 反向传播和优化
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # 记录当前 epoch 的平均损失值
+    epoch_loss_avg = sum(epoch_losses) / len(epoch_losses)
+    losses.append(epoch_loss_avg)
+
+    # 打印训练信息
+    if (epoch + 1) % 100 == 0:
+        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss_avg:.4f}')
+
+# 绘制训练损失图
+plt.plot(losses)
+plt.title('Training Loss over Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.show()
+
+# 禁用梯度计算，因为我们只对输入进行 SHAP 值计算
+torch.set_grad_enabled(False)
+
+# 获取模型的最后一层权重
+last_layer_weights = model.fc.weight.data.cpu().numpy()
+
+# 使用 SHAP 创建解释器
+explainer = shap.Explainer(model, feature_names=df1.columns[:-1].tolist())
+shap_values = explainer.shap_values(features.cpu().numpy())
+
+# 汇总 SHAP 值
+shap_summary = shap.summary_plot(shap_values, features.cpu().numpy(), feature_names=df1.columns[:-1].tolist())
+
+# 计算 R2 分数
+with torch.no_grad():
+    predictions = model(features).cpu().numpy()
+    r2 = r2_score(labels.cpu().numpy(), predictions)
+    print(f'R2 Score: {r2:.4f}')
