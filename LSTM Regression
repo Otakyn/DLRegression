@@ -16,7 +16,8 @@ df1 = df.iloc[:, 0:-2]
 
 # 提取多个输入特征和一个输出标签
 features = df1.iloc[:, df1.columns != 'turnover'].values  # 请替换为你的输入特征列名
-labels = df1['turnover'].values  # 请替换为你的输出列名
+labels = df1['turnover'].values.reshape(-1, 1)  # 重新形状以与模型的输出一致
+
 
 # 标准化输入特征
 scaler = StandardScaler()
@@ -40,7 +41,9 @@ class LSTM(nn.Module):
     def forward(self, x):
         out, _ = self.lstm(x)
         out = self.fc(out[:, -1, :])  # 仅使用最后一个时间步的输出
+        out = out.requires_grad_()  # 确保输出张量需要梯度计算
         return out
+
 
 # 定义超参数
 input_size = features.shape[2]  # 输入特征的维度（多个自变量）
@@ -103,7 +106,8 @@ torch.set_grad_enabled(False)
 last_layer_weights = model.fc.weight.data.cpu().numpy()
 
 # 使用 SHAP 创建解释器
-explainer = shap.Explainer(model, feature_names=df1.columns[:-1].tolist())
+masker = shap.maskers.Independent(data=features.cpu().numpy())
+explainer = shap.Explainer(model, masker, feature_names=df1.columns[:-1].tolist())
 shap_values = explainer.shap_values(features.cpu().numpy())
 
 # 汇总 SHAP 值
@@ -114,3 +118,4 @@ with torch.no_grad():
     predictions = model(features).cpu().numpy()
     r2 = r2_score(labels.cpu().numpy(), predictions)
     print(f'R2 Score: {r2:.4f}')
+
